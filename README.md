@@ -45,6 +45,10 @@ npx wrangler kv namespace create LINKS_KV --preview
 npm run dev
 ```
 
+## Reusable backend snippets
+
+Copy-paste, interview-ready backend snippets (including non-URL-shortener templates) are available at `docs/backend-snippets.md`.
+
 ## API examples
 
 ### Create
