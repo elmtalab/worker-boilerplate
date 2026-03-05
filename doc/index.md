@@ -100,10 +100,6 @@ export default {
 - "How would you debug latency spikes in edge regions?"
 - "How would you do zero-downtime migrations for API versions?"
 
-## Additional skeleton
-
-Open **`worker-todo-app-skeleton.md`** for a different app skeleton you can discuss in interviews.
-
 ## Next file
 
 Open **`cloudflare-worker-interview-cheatsheet.md`** for deeper Q&A and implementation patterns.
