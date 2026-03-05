@@ -101,3 +101,27 @@ http://127.0.0.1:8787/demo1234
 ```
 
 - `DELETE` disables a link by setting `active=false` (no hard delete), so it can be restored via `PATCH`.
+
+## Python smoke test (Google Colab-friendly)
+
+A ready-to-run script is available at `colab_api_smoke_test.py` to exercise all API routes:
+
+- `POST /api/v1/links`
+- `GET /api/v1/links/{code}`
+- `PATCH /api/v1/links/{code}`
+- `GET /{code}` redirect
+- `DELETE /api/v1/links/{code}`
+- `GET /{code}` after delete (expects 404)
+
+### In Google Colab
+
+```python
+!pip -q install requests
+!python colab_api_smoke_test.py --base-url "https://<your-worker-domain>"
+```
+
+### Local run
+
+```bash
+python colab_api_smoke_test.py --base-url "http://127.0.0.1:8787"
+```
