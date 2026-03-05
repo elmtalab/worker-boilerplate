@@ -1,14 +1,37 @@
-import { Hono } from 'hono'
-
-const app = new Hono()
 const CODE_REGEX = /^[a-zA-Z0-9_-]{4,32}$/
-
-function jsonError(c, status, code, message) {
-  return c.json({ ok: false, error: { code, message }, requestId: c.get('requestId') }, status)
-}
 
 function getKey(code) {
   return `link:${code}`
+}
+
+function isValidHttpUrl(value) {
+  return typeof value === 'string' && (value.startsWith('http://') || value.startsWith('https://'))
+}
+
+function generateCode() {
+  return crypto.randomUUID().replace(/-/g, '').slice(0, 7)
+}
+
+function jsonResponse(payload, status, requestId) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      'x-request-id': requestId,
+    },
+  })
+}
+
+function jsonError(status, code, message, requestId) {
+  return jsonResponse({ ok: false, error: { code, message }, requestId }, status, requestId)
+}
+
+async function parseJson(request) {
+  try {
+    return await request.json()
+  } catch {
+    return null
+  }
 }
 
 async function loadLink(kv, code) {
@@ -22,39 +45,31 @@ async function loadLink(kv, code) {
   }
 }
 
-function isValidHttpUrl(value) {
-  if (typeof value !== 'string') return false
-  return value.startsWith('http://') || value.startsWith('https://')
+function redirectResponse(location, requestId) {
+  return new Response(null, {
+    status: 302,
+    headers: {
+      location,
+      'x-request-id': requestId,
+    },
+  })
 }
 
-function generateCode() {
-  return crypto.randomUUID().replace(/-/g, '').slice(0, 7)
-}
-
-app.use('*', async (c, next) => {
-  const requestId = crypto.randomUUID()
-  c.set('requestId', requestId)
-  await next()
-  c.header('x-request-id', requestId)
-})
-
-app.post('/api/v1/links', async (c) => {
-  let body
-  try {
-    body = await c.req.json()
-  } catch {
-    return jsonError(c, 400, 'INVALID_JSON', 'Request body must be valid JSON')
+async function handleCreateLink(request, env, requestId) {
+  const body = await parseJson(request)
+  if (!body) {
+    return jsonError(400, 'INVALID_JSON', 'Request body must be valid JSON', requestId)
   }
 
-  const url = body?.url
-  const requestedCode = body?.code
+  const url = body.url
+  const requestedCode = body.code
 
   if (!isValidHttpUrl(url)) {
-    return jsonError(c, 400, 'VALIDATION_ERROR', 'URL must start with http:// or https://')
+    return jsonError(400, 'VALIDATION_ERROR', 'URL must start with http:// or https://', requestId)
   }
 
   if (requestedCode !== undefined && !CODE_REGEX.test(requestedCode)) {
-    return jsonError(c, 400, 'VALIDATION_ERROR', 'Code must be 4-32 chars: letters, numbers, _ or -')
+    return jsonError(400, 'VALIDATION_ERROR', 'Code must be 4-32 chars: letters, numbers, _ or -', requestId)
   }
 
   let code = requestedCode || generateCode()
@@ -62,19 +77,19 @@ app.post('/api/v1/links', async (c) => {
   if (!requestedCode) {
     let attempts = 0
     while (attempts < 5) {
-      const existing = await c.env.LINKS_KV.get(getKey(code))
+      const existing = await env.LINKS_KV.get(getKey(code))
       if (!existing) break
       code = generateCode()
       attempts += 1
     }
 
     if (attempts === 5) {
-      return jsonError(c, 500, 'CODE_GENERATION_FAILED', 'Could not generate a unique code')
+      return jsonError(500, 'CODE_GENERATION_FAILED', 'Could not generate a unique code', requestId)
     }
   } else {
-    const existing = await c.env.LINKS_KV.get(getKey(code))
+    const existing = await env.LINKS_KV.get(getKey(code))
     if (existing) {
-      return jsonError(c, 409, 'CODE_TAKEN', 'Code already exists')
+      return jsonError(409, 'CODE_TAKEN', 'Code already exists', requestId)
     }
   }
 
@@ -87,10 +102,10 @@ app.post('/api/v1/links', async (c) => {
     updatedAt: now,
   }
 
-  await c.env.LINKS_KV.put(getKey(code), JSON.stringify(record))
+  await env.LINKS_KV.put(getKey(code), JSON.stringify(record))
 
-  const baseUrl = c.env.BASE_URL || new URL(c.req.url).origin
-  return c.json(
+  const baseUrl = env.BASE_URL || new URL(request.url).origin
+  return jsonResponse(
     {
       ok: true,
       data: {
@@ -101,57 +116,54 @@ app.post('/api/v1/links', async (c) => {
         createdAt: now,
         updatedAt: now,
       },
-      requestId: c.get('requestId'),
+      requestId,
     },
-    201
+    201,
+    requestId
   )
-})
+}
 
-app.get('/api/v1/links/:code', async (c) => {
-  const code = c.req.param('code')
+async function handleReadLink(code, env, requestId) {
   if (!CODE_REGEX.test(code)) {
-    return jsonError(c, 400, 'INVALID_CODE', 'Code format is invalid')
+    return jsonError(400, 'INVALID_CODE', 'Code format is invalid', requestId)
   }
 
-  const record = await loadLink(c.env.LINKS_KV, code)
+  const record = await loadLink(env.LINKS_KV, code)
   if (!record) {
-    return jsonError(c, 404, 'NOT_FOUND', 'Code not found')
+    return jsonError(404, 'NOT_FOUND', 'Code not found', requestId)
   }
 
-  return c.json({ ok: true, data: record, requestId: c.get('requestId') })
-})
+  return jsonResponse({ ok: true, data: record, requestId }, 200, requestId)
+}
 
-app.patch('/api/v1/links/:code', async (c) => {
-  const code = c.req.param('code')
+async function handleUpdateLink(request, code, env, requestId) {
   if (!CODE_REGEX.test(code)) {
-    return jsonError(c, 400, 'INVALID_CODE', 'Code format is invalid')
+    return jsonError(400, 'INVALID_CODE', 'Code format is invalid', requestId)
   }
 
-  const existing = await loadLink(c.env.LINKS_KV, code)
+  const existing = await loadLink(env.LINKS_KV, code)
   if (!existing) {
-    return jsonError(c, 404, 'NOT_FOUND', 'Code not found')
+    return jsonError(404, 'NOT_FOUND', 'Code not found', requestId)
   }
 
-  let body
-  try {
-    body = await c.req.json()
-  } catch {
-    return jsonError(c, 400, 'INVALID_JSON', 'Request body must be valid JSON')
+  const body = await parseJson(request)
+  if (!body) {
+    return jsonError(400, 'INVALID_JSON', 'Request body must be valid JSON', requestId)
   }
 
-  const hasUrl = body && Object.prototype.hasOwnProperty.call(body, 'url')
-  const hasActive = body && Object.prototype.hasOwnProperty.call(body, 'active')
+  const hasUrl = Object.prototype.hasOwnProperty.call(body, 'url')
+  const hasActive = Object.prototype.hasOwnProperty.call(body, 'active')
 
   if (!hasUrl && !hasActive) {
-    return jsonError(c, 400, 'VALIDATION_ERROR', 'At least one field (url or active) must be provided')
+    return jsonError(400, 'VALIDATION_ERROR', 'At least one field (url or active) must be provided', requestId)
   }
 
   if (hasUrl && !isValidHttpUrl(body.url)) {
-    return jsonError(c, 400, 'VALIDATION_ERROR', 'URL must start with http:// or https://')
+    return jsonError(400, 'VALIDATION_ERROR', 'URL must start with http:// or https://', requestId)
   }
 
   if (hasActive && typeof body.active !== 'boolean') {
-    return jsonError(c, 400, 'VALIDATION_ERROR', 'active must be a boolean')
+    return jsonError(400, 'VALIDATION_ERROR', 'active must be a boolean', requestId)
   }
 
   const updated = {
@@ -161,20 +173,19 @@ app.patch('/api/v1/links/:code', async (c) => {
     updatedAt: new Date().toISOString(),
   }
 
-  await c.env.LINKS_KV.put(getKey(code), JSON.stringify(updated))
+  await env.LINKS_KV.put(getKey(code), JSON.stringify(updated))
 
-  return c.json({ ok: true, data: updated, requestId: c.get('requestId') })
-})
+  return jsonResponse({ ok: true, data: updated, requestId }, 200, requestId)
+}
 
-app.delete('/api/v1/links/:code', async (c) => {
-  const code = c.req.param('code')
+async function handleDeleteLink(code, env, requestId) {
   if (!CODE_REGEX.test(code)) {
-    return jsonError(c, 400, 'INVALID_CODE', 'Code format is invalid')
+    return jsonError(400, 'INVALID_CODE', 'Code format is invalid', requestId)
   }
 
-  const existing = await loadLink(c.env.LINKS_KV, code)
+  const existing = await loadLink(env.LINKS_KV, code)
   if (!existing) {
-    return jsonError(c, 404, 'NOT_FOUND', 'Code not found')
+    return jsonError(404, 'NOT_FOUND', 'Code not found', requestId)
   }
 
   const disabled = {
@@ -183,23 +194,55 @@ app.delete('/api/v1/links/:code', async (c) => {
     updatedAt: new Date().toISOString(),
   }
 
-  await c.env.LINKS_KV.put(getKey(code), JSON.stringify(disabled))
+  await env.LINKS_KV.put(getKey(code), JSON.stringify(disabled))
 
-  return c.json({ ok: true, data: { code, disabled: true }, requestId: c.get('requestId') })
-})
+  return jsonResponse({ ok: true, data: { code, disabled: true }, requestId }, 200, requestId)
+}
 
-app.get('/:code', async (c) => {
-  const code = c.req.param('code')
+async function handleRedirect(code, env, requestId) {
   if (!CODE_REGEX.test(code)) {
-    return jsonError(c, 404, 'NOT_FOUND', 'Code not found')
+    return jsonError(404, 'NOT_FOUND', 'Code not found', requestId)
   }
 
-  const record = await loadLink(c.env.LINKS_KV, code)
+  const record = await loadLink(env.LINKS_KV, code)
   if (!record || !record.active) {
-    return jsonError(c, 404, 'NOT_FOUND', 'Code not found')
+    return jsonError(404, 'NOT_FOUND', 'Code not found', requestId)
   }
 
-  return c.redirect(record.targetUrl, 302)
-})
+  return redirectResponse(record.targetUrl, requestId)
+}
 
-export default app
+export default {
+  async fetch(request, env) {
+    const requestId = crypto.randomUUID()
+    const url = new URL(request.url)
+    const { pathname } = url
+    const method = request.method.toUpperCase()
+
+    if (method === 'POST' && pathname === '/api/v1/links') {
+      return handleCreateLink(request, env, requestId)
+    }
+
+    const apiMatch = pathname.match(/^\/api\/v1\/links\/([^/]+)$/)
+    if (apiMatch) {
+      const code = apiMatch[1]
+
+      if (method === 'GET') {
+        return handleReadLink(code, env, requestId)
+      }
+      if (method === 'PATCH') {
+        return handleUpdateLink(request, code, env, requestId)
+      }
+      if (method === 'DELETE') {
+        return handleDeleteLink(code, env, requestId)
+      }
+    }
+
+    const redirectMatch = pathname.match(/^\/([^/]+)$/)
+    if (method === 'GET' && redirectMatch && redirectMatch[1] !== 'api') {
+      return handleRedirect(redirectMatch[1], env, requestId)
+    }
+
+    return jsonError(404, 'NOT_FOUND', 'Route not found', requestId)
+  },
+}

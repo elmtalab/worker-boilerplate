@@ -1,6 +1,6 @@
 # Worker Boilerplate: Minimal KV-Only URL Shortener API
 
-This is an operational Cloudflare Worker URL shortener with **KV only** and exactly these APIs:
+This is an operational Cloudflare Worker URL shortener with **KV only**, using plain Worker JavaScript (no routing framework), and exactly these APIs:
 
 - `GET /{code}` (redirect)
 - `POST /api/v1/links` (create)
