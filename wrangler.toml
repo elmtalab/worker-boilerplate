@@ -4,8 +4,7 @@ compatibility_date = "2025-01-24"
 
 [[kv_namespaces]]
 binding = "LINKS_KV"
-id = "replace-with-prod-kv-id"
-preview_id = "replace-with-preview-kv-id"
+id = "5c8e1117889846bcb2b01a6aa4d1f8c2"
 
 [vars]
 BASE_URL = "http://127.0.0.1:8787"
