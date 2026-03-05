@@ -1,5 +1,5 @@
 name = "worker-boilerplate"
-main = "src/index.ts"
+main = "src/index.js"
 compatibility_date = "2025-01-24"
 
 [[kv_namespaces]]

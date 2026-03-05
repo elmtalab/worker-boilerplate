@@ -1,57 +1,35 @@
 import { Hono } from 'hono'
-import { z } from 'zod'
 
-interface Env {
-  LINKS_KV: KVNamespace
-  BASE_URL?: string
-}
+const app = new Hono()
+const CODE_REGEX = /^[a-zA-Z0-9_-]{4,32}$/
 
-type LinkRecord = {
-  code: string
-  targetUrl: string
-  active: boolean
-  createdAt: string
-  updatedAt: string
-}
-
-const createLinkSchema = z.object({
-  url: z.string().url().refine((value) => value.startsWith('http://') || value.startsWith('https://'), {
-    message: 'URL must start with http:// or https://',
-  }),
-  code: z.string().regex(/^[a-zA-Z0-9_-]{4,32}$/).optional(),
-})
-
-const updateLinkSchema = z
-  .object({
-    url: z
-      .string()
-      .url()
-      .refine((value) => value.startsWith('http://') || value.startsWith('https://'), {
-        message: 'URL must start with http:// or https://',
-      })
-      .optional(),
-    active: z.boolean().optional(),
-  })
-  .refine((data) => data.url !== undefined || data.active !== undefined, {
-    message: 'At least one field (url or active) must be provided',
-  })
-
-const codeRegex = /^[a-zA-Z0-9_-]{4,32}$/
-const app = new Hono<{ Bindings: Env; Variables: { requestId: string } }>()
-
-const jsonError = (c: any, status: number, code: string, message: string) => {
+function jsonError(c, status, code, message) {
   return c.json({ ok: false, error: { code, message }, requestId: c.get('requestId') }, status)
 }
 
-const getKey = (code: string) => `link:${code}`
-
-const loadLink = async (kv: KVNamespace, code: string): Promise<LinkRecord | null> => {
-  const raw = await kv.get(getKey(code))
-  if (!raw) return null
-  return JSON.parse(raw) as LinkRecord
+function getKey(code) {
+  return `link:${code}`
 }
 
-const generateCode = () => crypto.randomUUID().replace(/-/g, '').slice(0, 7)
+async function loadLink(kv, code) {
+  const raw = await kv.get(getKey(code))
+  if (!raw) return null
+
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return null
+  }
+}
+
+function isValidHttpUrl(value) {
+  if (typeof value !== 'string') return false
+  return value.startsWith('http://') || value.startsWith('https://')
+}
+
+function generateCode() {
+  return crypto.randomUUID().replace(/-/g, '').slice(0, 7)
+}
 
 app.use('*', async (c, next) => {
   const requestId = crypto.randomUUID()
@@ -61,22 +39,25 @@ app.use('*', async (c, next) => {
 })
 
 app.post('/api/v1/links', async (c) => {
-  let body: unknown
+  let body
   try {
     body = await c.req.json()
   } catch {
     return jsonError(c, 400, 'INVALID_JSON', 'Request body must be valid JSON')
   }
 
-  const parsed = createLinkSchema.safeParse(body)
-  if (!parsed.success) {
-    return jsonError(c, 400, 'VALIDATION_ERROR', parsed.error.issues[0]?.message ?? 'Invalid input')
+  const url = body?.url
+  const requestedCode = body?.code
+
+  if (!isValidHttpUrl(url)) {
+    return jsonError(c, 400, 'VALIDATION_ERROR', 'URL must start with http:// or https://')
   }
 
-  const requestedCode = parsed.data.code
-  const url = parsed.data.url
+  if (requestedCode !== undefined && !CODE_REGEX.test(requestedCode)) {
+    return jsonError(c, 400, 'VALIDATION_ERROR', 'Code must be 4-32 chars: letters, numbers, _ or -')
+  }
 
-  let code = requestedCode ?? generateCode()
+  let code = requestedCode || generateCode()
 
   if (!requestedCode) {
     let attempts = 0
@@ -86,6 +67,7 @@ app.post('/api/v1/links', async (c) => {
       code = generateCode()
       attempts += 1
     }
+
     if (attempts === 5) {
       return jsonError(c, 500, 'CODE_GENERATION_FAILED', 'Could not generate a unique code')
     }
@@ -97,10 +79,17 @@ app.post('/api/v1/links', async (c) => {
   }
 
   const now = new Date().toISOString()
-  const record: LinkRecord = { code, targetUrl: url, active: true, createdAt: now, updatedAt: now }
+  const record = {
+    code,
+    targetUrl: url,
+    active: true,
+    createdAt: now,
+    updatedAt: now,
+  }
+
   await c.env.LINKS_KV.put(getKey(code), JSON.stringify(record))
 
-  const baseUrl = c.env.BASE_URL ?? new URL(c.req.url).origin
+  const baseUrl = c.env.BASE_URL || new URL(c.req.url).origin
   return c.json(
     {
       ok: true,
@@ -120,7 +109,7 @@ app.post('/api/v1/links', async (c) => {
 
 app.get('/api/v1/links/:code', async (c) => {
   const code = c.req.param('code')
-  if (!codeRegex.test(code)) {
+  if (!CODE_REGEX.test(code)) {
     return jsonError(c, 400, 'INVALID_CODE', 'Code format is invalid')
   }
 
@@ -134,7 +123,7 @@ app.get('/api/v1/links/:code', async (c) => {
 
 app.patch('/api/v1/links/:code', async (c) => {
   const code = c.req.param('code')
-  if (!codeRegex.test(code)) {
+  if (!CODE_REGEX.test(code)) {
     return jsonError(c, 400, 'INVALID_CODE', 'Code format is invalid')
   }
 
@@ -143,22 +132,32 @@ app.patch('/api/v1/links/:code', async (c) => {
     return jsonError(c, 404, 'NOT_FOUND', 'Code not found')
   }
 
-  let body: unknown
+  let body
   try {
     body = await c.req.json()
   } catch {
     return jsonError(c, 400, 'INVALID_JSON', 'Request body must be valid JSON')
   }
 
-  const parsed = updateLinkSchema.safeParse(body)
-  if (!parsed.success) {
-    return jsonError(c, 400, 'VALIDATION_ERROR', parsed.error.issues[0]?.message ?? 'Invalid input')
+  const hasUrl = body && Object.prototype.hasOwnProperty.call(body, 'url')
+  const hasActive = body && Object.prototype.hasOwnProperty.call(body, 'active')
+
+  if (!hasUrl && !hasActive) {
+    return jsonError(c, 400, 'VALIDATION_ERROR', 'At least one field (url or active) must be provided')
   }
 
-  const updated: LinkRecord = {
+  if (hasUrl && !isValidHttpUrl(body.url)) {
+    return jsonError(c, 400, 'VALIDATION_ERROR', 'URL must start with http:// or https://')
+  }
+
+  if (hasActive && typeof body.active !== 'boolean') {
+    return jsonError(c, 400, 'VALIDATION_ERROR', 'active must be a boolean')
+  }
+
+  const updated = {
     ...existing,
-    targetUrl: parsed.data.url ?? existing.targetUrl,
-    active: parsed.data.active ?? existing.active,
+    targetUrl: hasUrl ? body.url : existing.targetUrl,
+    active: hasActive ? body.active : existing.active,
     updatedAt: new Date().toISOString(),
   }
 
@@ -169,7 +168,7 @@ app.patch('/api/v1/links/:code', async (c) => {
 
 app.delete('/api/v1/links/:code', async (c) => {
   const code = c.req.param('code')
-  if (!codeRegex.test(code)) {
+  if (!CODE_REGEX.test(code)) {
     return jsonError(c, 400, 'INVALID_CODE', 'Code format is invalid')
   }
 
@@ -178,11 +177,12 @@ app.delete('/api/v1/links/:code', async (c) => {
     return jsonError(c, 404, 'NOT_FOUND', 'Code not found')
   }
 
-  const disabled: LinkRecord = {
+  const disabled = {
     ...existing,
     active: false,
     updatedAt: new Date().toISOString(),
   }
+
   await c.env.LINKS_KV.put(getKey(code), JSON.stringify(disabled))
 
   return c.json({ ok: true, data: { code, disabled: true }, requestId: c.get('requestId') })
@@ -190,7 +190,7 @@ app.delete('/api/v1/links/:code', async (c) => {
 
 app.get('/:code', async (c) => {
   const code = c.req.param('code')
-  if (!codeRegex.test(code)) {
+  if (!CODE_REGEX.test(code)) {
     return jsonError(c, 404, 'NOT_FOUND', 'Code not found')
   }
 
