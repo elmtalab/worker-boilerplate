@@ -1,0 +1,11 @@
+name = "worker-boilerplate"
+main = "src/index.ts"
+compatibility_date = "2025-01-24"
+
+[[kv_namespaces]]
+binding = "LINKS_KV"
+id = "replace-with-prod-kv-id"
+preview_id = "replace-with-preview-kv-id"
+
+[vars]
+BASE_URL = "http://127.0.0.1:8787"
